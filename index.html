@@ -1,0 +1,250 @@
+<!doctype html>
+<html charset="utf-8">
+<head>
+<title>Max Dumas &mdash; Basic Ray Tracer</title>
+<script type="text/javascript" src="gl.js"></script>
+<script id="vertex-shader" type="text/x-shader">
+attribute vec3 a_pos;
+varying   vec3 v_pixel;
+void main() {
+	gl_Position = vec4(a_pos, 1.0);
+	v_pixel = a_pos;
+}
+</script>
+
+<script id="fragment-shader" type="text/x-shader">
+precision mediump float;
+const int N_REFLECTIONS = 2;
+const int N_SPHERES = 2;
+const int N_LIGHTS = 2;
+const float RAY_NO_INTERSECT = 1000000000.;
+const float FL = 10.; // Camera focal length
+const vec3 CAMERA = vec3(0., 0., FL);
+const float REFL_EPSILON = 0.001;
+
+uniform float u_time;
+uniform vec3  u_mouse;
+uniform vec3 u_ambient;
+uniform vec4 u_spheres[N_SPHERES];
+uniform vec3 u_diffuse[N_SPHERES];
+uniform vec4 u_specular[N_SPHERES];
+uniform vec3 u_lightRGB[N_LIGHTS];
+uniform vec3 u_lightDir[N_LIGHTS];
+
+varying vec3  v_pixel;
+vec3 ray_dir = normalize(v_pixel - CAMERA);
+float ts[N_SPHERES];
+
+// PERLIN NOISE
+
+vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
+vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+vec3 fade(vec3 t) { return t*t*t*(t*(t*6.0-15.0)+10.0); }
+float noise(vec3 P) {
+  vec3 i0 = mod289(floor(P)), i1 = mod289(i0 + vec3(1.0));
+  vec3 f0 = fract(P), f1 = f0 - vec3(1.0), f = fade(f0);
+  vec4 ix = vec4(i0.x, i1.x, i0.x, i1.x), iy = vec4(i0.yy, i1.yy);
+  vec4 iz0 = i0.zzzz, iz1 = i1.zzzz;
+  vec4 ixy = permute(permute(ix) + iy), ixy0 = permute(ixy + iz0), ixy1 = permute(ixy + iz1);
+  vec4 gx0 = ixy0 * (1.0 / 7.0), gy0 = fract(floor(gx0) * (1.0 / 7.0)) - 0.5;
+  vec4 gx1 = ixy1 * (1.0 / 7.0), gy1 = fract(floor(gx1) * (1.0 / 7.0)) - 0.5;
+  gx0 = fract(gx0); gx1 = fract(gx1);
+  vec4 gz0 = vec4(0.5) - abs(gx0) - abs(gy0), sz0 = step(gz0, vec4(0.0));
+  vec4 gz1 = vec4(0.5) - abs(gx1) - abs(gy1), sz1 = step(gz1, vec4(0.0));
+  gx0 -= sz0 * (step(0.0, gx0) - 0.5); gy0 -= sz0 * (step(0.0, gy0) - 0.5);
+  gx1 -= sz1 * (step(0.0, gx1) - 0.5); gy1 -= sz1 * (step(0.0, gy1) - 0.5);
+  vec3 g0 = vec3(gx0.x,gy0.x,gz0.x), g1 = vec3(gx0.y,gy0.y,gz0.y),
+       g2 = vec3(gx0.z,gy0.z,gz0.z), g3 = vec3(gx0.w,gy0.w,gz0.w),
+       g4 = vec3(gx1.x,gy1.x,gz1.x), g5 = vec3(gx1.y,gy1.y,gz1.y),
+       g6 = vec3(gx1.z,gy1.z,gz1.z), g7 = vec3(gx1.w,gy1.w,gz1.w);
+  vec4 norm0 = taylorInvSqrt(vec4(dot(g0,g0), dot(g2,g2), dot(g1,g1), dot(g3,g3)));
+  vec4 norm1 = taylorInvSqrt(vec4(dot(g4,g4), dot(g6,g6), dot(g5,g5), dot(g7,g7)));
+  g0 *= norm0.x; g2 *= norm0.y; g1 *= norm0.z; g3 *= norm0.w;
+  g4 *= norm1.x; g6 *= norm1.y; g5 *= norm1.z; g7 *= norm1.w;
+  vec4 nz = mix(vec4(dot(g0, vec3(f0.x, f0.y, f0.z)), dot(g1, vec3(f1.x, f0.y, f0.z)),
+                     dot(g2, vec3(f0.x, f1.y, f0.z)), dot(g3, vec3(f1.x, f1.y, f0.z))),
+                vec4(dot(g4, vec3(f0.x, f0.y, f1.z)), dot(g5, vec3(f1.x, f0.y, f1.z)),
+                     dot(g6, vec3(f0.x, f1.y, f1.z)), dot(g7, vec3(f1.x, f1.y, f1.z))), f.z);
+  return 2.2 * mix(mix(nz.x,nz.z,f.y), mix(nz.y,nz.w,f.y), f.x);
+}
+float noise(vec2 P) { return noise(vec3(P, 0.0)); }
+float fractal(vec3 P) {
+  float f = 0., s = 1.;
+  for (int i = 0 ; i < 9 ; i++) {
+     f += noise(s * P) / s;
+     s *= 2.;
+     P = vec3(.866 * P.x + .5 * P.z, P.y + 100., -.5 * P.x + .866 * P.z);
+  }
+  return f;
+}
+float turbulence(vec3 P) {
+  float f = 0., s = 1.;
+  for (int i = 0 ; i < 9 ; i++) {
+     f += abs(noise(s * P)) / s;
+     s *= 2.;
+     P = vec3(.866 * P.x + .5 * P.z, P.y + 100., -.5 * P.x + .866 * P.z);
+  }
+  return f;
+}
+
+// END PERLIN NOISE
+
+float radius(const vec4 sphere) {
+   return sphere.w;
+}
+vec3 center(const vec4 sphere) {
+   return sphere.xyz;
+}
+vec3 normal(const vec4 sphere, const float t) {
+   return normalize(center(sphere) - (CAMERA + ray_dir * t));
+}
+float ray_intersect(const vec3 ray_orig, const vec3 ray_dir, const vec4 sphere) {
+   vec3 rd = normalize(ray_dir);
+   vec3 x = ray_orig - center(sphere);
+   float r = radius(sphere);
+   float b = dot(x, rd);
+   float c = dot(x, x) - r * r;
+   float discr = b * b - c;
+   if(discr < 0.) return RAY_NO_INTERSECT;
+   float m = sqrt(discr);
+   return -b - m; // We only gather the smaller t as it is the closer intersection
+}
+int os(int s) { // Returns index of other sphere from s
+   if(s == 0) return 1;
+   else return 0;
+}
+vec3 phong(const int s, vec3 N, const vec3 S, const vec3 W) {
+   for(int j = 0; j <= 1; j++) {
+      if(j == s) { // Hack to allow us to use func parameter as index.
+         float p = u_specular[j].a;
+         vec3 diffuse = vec3(0.);
+         vec3 specular = vec3(0.);
+         for(int i = 0; i < N_LIGHTS; i++) {
+            float r = ray_intersect(S, -u_lightDir[i], u_spheres[os(j)]);
+            if(r > 0. && r < distance(center(u_spheres[1]), center(u_spheres[0]))) {
+               continue;
+            }
+            vec3 Ld = normalize(u_lightDir[i]);
+            vec3 Lc = u_lightRGB[i];
+            float G = max(0., dot(N, Ld));
+            diffuse += Lc * G;
+            vec3 R = 2. * N * max(0., dot(N, Ld)) - Ld;
+            float H = max(0., dot(R, W));
+            specular += Lc * pow(H, p);
+         }
+         vec3 diff_p = u_diffuse[j]; // * fractal(S);
+         vec3 baseColor = u_ambient + diff_p * diffuse + u_specular[j].rgb * specular;
+         return pow(baseColor, vec3(.45));
+      }
+   }
+   return vec3(0.);
+}
+vec3 background(float t, vec3 rd)
+{
+   vec3 light = normalize(vec3(sin(t / 5.), .1, cos(t / 5.)));
+   float sun = max(0., dot(rd, light) / 10.);
+   float sky = max(0., dot(rd, vec3(0., 1., 0.)));
+   float ground = max(0., -dot(rd, vec3(0., 1., 0.)));
+   return
+	   (pow(sun, 256.) + 0.2 * pow(sun, 2.)) * vec3(2., 1.6, 1.) +
+	   pow(ground, .5) * vec3(.4, .3, .2) +
+	   pow(sky, 1.) * vec3(.5, .6, .7);
+}
+
+void main() {
+   ts[0] = ray_intersect(CAMERA, ray_dir, u_spheres[0]); // * 3. * fractal(ray_dir + u_time / 200.));
+   ts[1] = ray_intersect(CAMERA, ray_dir, u_spheres[1]);
+   if(ts[0] < ts[1] && ts[0] < RAY_NO_INTERSECT) { // Draw first sphere
+      vec3 N = normal(u_spheres[0], ts[0]); // * 5. * fractal(ray_dir), ts[0]);
+      vec3 S = CAMERA + ray_dir * ts[0];
+            N += vec3(fractal(vec3(pow(3. * fractal(S), 5.))));
+            N = normalize(N);
+      vec3 W = ray_dir;
+
+      vec3 pre = phong(0, N, S, W);
+
+      vec3 Wp = -2. * N * max(0., dot(N, W)) + W;
+      vec3 V = S + REFL_EPSILON * Wp;
+      float r = ray_intersect(V, Wp, u_spheres[1]);
+      if(r > 0. && r < distance(center(u_spheres[1]), center(u_spheres[0]))) {
+         N = normal(u_spheres[1], r);
+         S = S + Wp * r;
+         W = Wp;
+         pre = mix(pre, phong(1, N, S, -W), vec3(.5));
+      }
+      gl_FragColor = vec4(pre, 1.);
+   } else if(ts[1] < ts[0] && ts[1] < RAY_NO_INTERSECT) { // Draw second sphere
+      vec3 N = normal(u_spheres[1], ts[1]);
+      vec3 S = CAMERA + ray_dir * ts[1];
+      N += vec3(fractal(S));
+      vec3 W = ray_dir;
+
+      vec3 pre = phong(1, N, S, W);
+
+      vec3 Wp = -2. * N * max(0., dot(N, W)) + W;
+      vec3 V = S + REFL_EPSILON * Wp;
+      float r = ray_intersect(V, Wp, u_spheres[0]);
+      if(r > 0. && r < distance(center(u_spheres[1]), center(u_spheres[0]))) {
+         N = normal(u_spheres[0], r);
+         S = S + Wp * r;
+         W = Wp;
+         pre = mix(pre, phong(0, N, S, -W), vec3(.5));
+      }
+      gl_FragColor = vec4(pre, 1.);
+   } else {
+      gl_FragColor = vec4(background(u_time, ray_dir * 10.), 1.);
+   }
+}
+</script>
+<script type="text/javascript">
+var startTime;
+var initialize_gl = function(gl) {
+	startTime = (new Date()).getTime();
+	gl.ambient = gl.getUniformLocation(gl.prog, "u_ambient");
+	gl.spheres = gl.getUniformLocation(gl.prog, "u_spheres");
+	gl.diffuse = gl.getUniformLocation(gl.prog, "u_diffuse");
+	gl.specular = gl.getUniformLocation(gl.prog, "u_specular");
+	gl.lightColors = gl.getUniformLocation(gl.prog, "u_lightRGB");
+	gl.lightDirs = gl.getUniformLocation(gl.prog, "u_lightDir");
+};
+
+var update_gl = function(gl) {
+	var time = ((new Date()).getTime() - startTime) / 1000;
+	gl.uniform3f(gl.ambient, 0.02, 0.02, 0.02);
+	gl.uniform4fv(gl.spheres, new Float32Array([
+		0,0,0,0.5, 
+		Math.sin(time),0,Math.cos(time),0.25
+	]));
+	gl.uniform3fv(gl.diffuse, new Float32Array([
+		0,0.5,1, 
+		1,0.5,0
+	]));
+	gl.uniform4fv(gl.specular, new Float32Array([
+		1,1,1,15,
+		1,1,1,15
+	]));
+	gl.uniform3fv(gl.lightColors, new Float32Array([
+		1,1,1,
+		0.2,0.2,0.2
+	]));
+	gl.uniform3fv(gl.lightDirs, new Float32Array([
+		1,0,0,
+		-1,1,-1
+	]));
+};
+
+// Begin initialization!
+var create = (function() {
+	var vertexShader = loadShader('vertex-shader');
+	var fragmentShader = loadShader('fragment-shader');
+	gl_create("canvas", vertexShader, fragmentShader);
+});
+
+</script>
+</head>
+<body onload="create()">
+<canvas id="canvas" width="640" height="640">Your browser does not support the canvas element!</canvas>
+</body>
+</html>
