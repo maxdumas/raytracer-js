@@ -2,6 +2,16 @@
 <html charset="utf-8">
 <head>
 <title>Max Dumas &mdash; Basic Ray Tracer</title>
+<style>
+body {
+  font-family: sans-serif;
+  text-align: center;
+}
+canvas {
+  margin: 0 auto;
+  display: block;
+}
+</style>
 <script type="text/javascript" src="gl.js"></script>
 <script id="vertex-shader" type="text/x-shader">
 attribute vec3 a_pos;
@@ -245,6 +255,7 @@ var create = (function() {
 </script>
 </head>
 <body onload="create()">
-<canvas id="canvas" width="640" height="640">Your browser does not support the canvas element!</canvas>
+  <canvas id="canvas" width="640" height="640">Your browser does not support the canvas element!</canvas>
+  <div>This project requires you to use the latest version of the Chrome web browser to display properly.</div>
 </body>
 </html>
